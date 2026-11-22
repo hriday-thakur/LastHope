@@ -48,24 +48,61 @@ class APIRequestTimeoutError(GroqClientError):
     pass
 
 
+def _get_from_st_secrets(key: str) -> Optional[str]:
+    """
+    Safely retrieves a configuration value from Streamlit Community Cloud st.secrets.
+    Supports flat keys (e.g. GROQ_API_KEY, groq_api_key) and section tables (e.g. [groq]).
+    Returns None if Streamlit is not running, secrets are not found, or access fails.
+    """
+    try:
+        import streamlit as st
+        if not hasattr(st, "secrets"):
+            return None
+        # Check flat key directly
+        if key in st.secrets and st.secrets[key]:
+            return str(st.secrets[key]).strip()
+        key_lower = key.lower()
+        if key_lower in st.secrets and st.secrets[key_lower]:
+            return str(st.secrets[key_lower]).strip()
+        # Check under [groq] section
+        if "groq" in st.secrets:
+            groq_section = st.secrets["groq"]
+            if isinstance(groq_section, dict):
+                short_key = key.replace("GROQ_", "").lower()
+                if short_key in groq_section and groq_section[short_key]:
+                    return str(groq_section[short_key]).strip()
+                if key in groq_section and groq_section[key]:
+                    return str(groq_section[key]).strip()
+    except Exception:
+        pass
+    return None
+
+
 def get_configured_model() -> str:
-    """Returns the model configured in .env, falling back to openai/gpt-oss-120b."""
+    """Returns the model configured in .env or st.secrets, falling back to openai/gpt-oss-120b."""
     load_dotenv(override=True)
-    model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-    return model.strip() if model else "openai/gpt-oss-120b"
+    model = os.getenv("GROQ_MODEL")
+    if not model or not model.strip():
+        model = _get_from_st_secrets("GROQ_MODEL")
+    model_str = str(model).strip() if model else ""
+    return model_str if model_str else "openai/gpt-oss-120b"
 
 
 def get_groq_client(timeout: float = 60.0, max_retries: int = 1) -> groq.Groq:
     """
     Initializes and returns an authenticated Groq client instance.
+    Supports local .env credentials and Streamlit Community Cloud st.secrets.
     Never exposes or logs the API key.
     """
     load_dotenv(override=True)
     api_key = os.getenv("GROQ_API_KEY")
 
     if not api_key or not api_key.strip() or "your_groq_api_key_here" in api_key:
+        api_key = _get_from_st_secrets("GROQ_API_KEY")
+
+    if not api_key or not api_key.strip() or "your_groq_api_key_here" in api_key:
         raise MissingAPIKeyError(
-            "GROQ_API_KEY is missing or unconfigured. Please add your Groq API key to the local .env file."
+            "GROQ_API_KEY is missing or unconfigured. Please add your Groq API key to your local .env file or Streamlit secrets."
         )
 
     return groq.Groq(
@@ -129,7 +166,7 @@ def generate_response(
         return content.strip()
 
     except groq.AuthenticationError as e:
-        raise AuthenticationError("Authentication failed: Invalid Groq API key in .env.") from e
+        raise AuthenticationError("Authentication failed: Invalid Groq API key in .env or Streamlit secrets.") from e
     except groq.NotFoundError as e:
         raise ModelNotFoundError(
             f"Model '{target_model}' was not found or is not accessible on your Groq account."
