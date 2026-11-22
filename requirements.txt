@@ -1,0 +1,11 @@
+# Streamlit Web Application Framework
+streamlit>=1.38.0
+
+# Official Groq API Client
+groq>=0.11.0
+
+# PyMuPDF for PDF text extraction with page preservation
+pymupdf>=1.24.0
+
+# Environment variable management (.env loader)
+python-dotenv>=1.0.0
