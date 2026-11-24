@@ -34,7 +34,8 @@ from prompts.question_generator import (
     MissingAnalysisError,
     IncompleteQuestionSetError,
 )
-from prompts.content_verifier import verify_content
+from prompts.content_verifier import verify_content, P3_DEFAULT_MAX_TOKENS
+from utils.export_helper import build_study_pack, sanitize_filename
 from ui.theme import inject_css
 from ui.components import (
     stage_rail,
@@ -94,12 +95,12 @@ def init_session_state():
 
 init_session_state()
 
-# Pipeline completion flags
+# Pipeline completion flags (guaranteeing non-empty content)
 doc_loaded = st.session_state.parsed_doc is not None
-p1_done = st.session_state.p1_analysis is not None
-p2_done = st.session_state.p2_questions is not None
-p3_done = st.session_state.p3_verification is not None
-export_ready = p1_done or p2_done
+p1_done = bool(st.session_state.p1_analysis and st.session_state.p1_analysis.strip())
+p2_done = bool(st.session_state.p2_questions and st.session_state.p2_questions.strip())
+p3_done = bool(st.session_state.p3_verification and st.session_state.p3_verification.strip())
+export_ready = bool(p1_done or p2_done)
 
 stages_done = [doc_loaded, p1_done, p2_done, p3_done, export_ready]
 
@@ -528,6 +529,7 @@ with tab_verify:
                             lecture_text=st.session_state.parsed_doc.extracted_text,
                             analysis_text=st.session_state.p1_analysis,
                             questions_text=st.session_state.p2_questions,
+                            max_tokens=P3_DEFAULT_MAX_TOKENS,
                             timeout=150.0,
                         )
                         st.session_state.p3_verification = p3_result
@@ -596,106 +598,100 @@ with tab_export:
         )
     else:
         doc_name = Path(st.session_state.file_name or "lecture").stem
+        safe_doc_name = sanitize_filename(st.session_state.file_name, fallback="lecture")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
 
-        # Compile comprehensive study pack (strictly preserving format and data)
-        pack_lines = [
-            f"# LastHope Study Pack: {doc_name}",
-            f"- Generated On: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"- Source File: {st.session_state.file_name}",
-            f"- Model Engine: {configured_model}",
-            "\n---\n",
-        ]
+        # Compile comprehensive study pack with error handling
+        try:
+            full_study_pack = build_study_pack(
+                doc_name=doc_name,
+                file_name=st.session_state.file_name,
+                model_name=configured_model,
+                p1_analysis=st.session_state.p1_analysis,
+                p2_questions=st.session_state.p2_questions,
+                p3_verification=st.session_state.p3_verification,
+            )
+        except Exception as e:
+            st.error(f"STUDY PACK COMPILATION ERROR: {type(e).__name__} - {e}")
+            full_study_pack = ""
 
-        if st.session_state.p1_analysis:
-            pack_lines.append("## PART I: LECTURE REVISION NOTES (P1)\n")
-            pack_lines.append(st.session_state.p1_analysis)
-            pack_lines.append("\n---\n")
-
-        if st.session_state.p2_questions:
-            pack_lines.append("## PART II: REVISION QUESTIONS & ANSWER KEY (P2)\n")
-            pack_lines.append(st.session_state.p2_questions)
-            pack_lines.append("\n---\n")
-
-        # Verification report strictly only included if it has been run
-        if st.session_state.p3_verification:
-            pack_lines.append("## PART III: CONTENT VERIFICATION & AUDIT REPORT (P3)\n")
-            pack_lines.append(st.session_state.p3_verification)
-            pack_lines.append("\n---\n")
-
-        full_study_pack = "\n".join(pack_lines)
-
-        col_meta, col_work = st.columns([3, 9])
-
-        with col_meta:
-            meta_items = [
-                ("PACKAGE", doc_name),
-                ("TIMESTAMP", timestamp),
-                ("STAGE 05 STATUS", "DISPATCH READY"),
-            ]
-            st.markdown(margin_meta_card(meta_items), unsafe_allow_html=True)
-
-        with col_work:
+        if not full_study_pack.strip():
             st.markdown(
-                study_pack_docket(doc_name, p1_done, p2_done, p3_done),
+                empty_card("NO CONTENT TO EXPORT", "THE GENERATED MATERIALS CONTAIN NO EXPORTABLE CONTENT.", is_dashed_pencil=True),
                 unsafe_allow_html=True,
             )
+        else:
+            col_meta, col_work = st.columns([3, 9])
 
-            st.write("")
-            st.markdown(section_label("COMPLETE REVISION PACK DISPATCH"), unsafe_allow_html=True)
+            with col_meta:
+                meta_items = [
+                    ("PACKAGE", doc_name),
+                    ("TIMESTAMP", timestamp),
+                    ("STAGE 05 STATUS", "DISPATCH READY"),
+                ]
+                st.markdown(margin_meta_card(meta_items), unsafe_allow_html=True)
 
-            col_md, col_txt = st.columns(2)
-            with col_md:
-                st.download_button(
-                    label="📥 Download Study Pack (.md)",
-                    data=full_study_pack,
-                    file_name=f"LastHope_{doc_name}_StudyPack_{timestamp}.md",
-                    mime="text/markdown",
-                    type="primary",
-                )
-            with col_txt:
-                st.download_button(
-                    label="📥 Download Study Pack (.txt)",
-                    data=full_study_pack,
-                    file_name=f"LastHope_{doc_name}_StudyPack_{timestamp}.txt",
-                    mime="text/plain",
+            with col_work:
+                st.markdown(
+                    study_pack_docket(doc_name, p1_done, p2_done, p3_done),
+                    unsafe_allow_html=True,
                 )
 
-            st.divider()
+                st.write("")
+                st.markdown(section_label("COMPLETE REVISION PACK DISPATCH"), unsafe_allow_html=True)
 
-            st.markdown(section_label("INDIVIDUAL SECTION DISPATCH"), unsafe_allow_html=True)
-
-            col_n, col_q, col_v = st.columns(3)
-
-            with col_n:
-                if st.session_state.p1_analysis:
+                col_md, col_txt = st.columns(2)
+                with col_md:
                     st.download_button(
-                        label="📄 Download Revision Notes Only",
-                        data=st.session_state.p1_analysis,
-                        file_name=f"LastHope_{doc_name}_Notes_{timestamp}.md",
+                        label="📥 Download Study Pack (.md)",
+                        data=full_study_pack,
+                        file_name=f"LastHope_{safe_doc_name}_StudyPack_{timestamp}.md",
                         mime="text/markdown",
+                        type="primary",
                     )
-                else:
-                    st.caption("Revision Notes: Not generated yet.")
-
-            with col_q:
-                if st.session_state.p2_questions:
+                with col_txt:
                     st.download_button(
-                        label="📝 Download Questions & Answers Only",
-                        data=st.session_state.p2_questions,
-                        file_name=f"LastHope_{doc_name}_Questions_{timestamp}.md",
-                        mime="text/markdown",
+                        label="📥 Download Study Pack (.txt)",
+                        data=full_study_pack,
+                        file_name=f"LastHope_{safe_doc_name}_StudyPack_{timestamp}.txt",
+                        mime="text/plain",
                     )
-                else:
-                    st.caption("Practice Questions: Not generated yet.")
 
-            with col_v:
-                if st.session_state.p3_verification:
-                    st.download_button(
-                        label="🛡️ Download Verification Report Only",
-                        data=st.session_state.p3_verification,
-                        file_name=f"LastHope_{doc_name}_Verification_{timestamp}.md",
-                        mime="text/markdown",
-                    )
-                else:
-                    st.caption("Verification Report: Not run yet.")
+                st.divider()
+
+                st.markdown(section_label("INDIVIDUAL SECTION DISPATCH"), unsafe_allow_html=True)
+
+                col_n, col_q, col_v = st.columns(3)
+
+                with col_n:
+                    if p1_done:
+                        st.download_button(
+                            label="📄 Download Revision Notes Only",
+                            data=st.session_state.p1_analysis.strip(),
+                            file_name=f"LastHope_{safe_doc_name}_Notes_{timestamp}.md",
+                            mime="text/markdown",
+                        )
+                    else:
+                        st.caption("Revision Notes: Not generated yet.")
+
+                with col_q:
+                    if p2_done:
+                        st.download_button(
+                            label="📝 Download Questions & Answers Only",
+                            data=st.session_state.p2_questions.strip(),
+                            file_name=f"LastHope_{safe_doc_name}_Questions_{timestamp}.md",
+                            mime="text/markdown",
+                        )
+                    else:
+                        st.caption("Practice Questions: Not generated yet.")
+
+                with col_v:
+                    if p3_done:
+                        st.download_button(
+                            label="🛡️ Download Verification Report Only",
+                            data=st.session_state.p3_verification.strip(),
+                            file_name=f"LastHope_{safe_doc_name}_Verification_{timestamp}.md",
+                            mime="text/markdown",
+                        )
+                    else:
+                        st.caption("Verification Report: Not run yet.")

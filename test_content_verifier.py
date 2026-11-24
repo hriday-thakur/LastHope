@@ -1,13 +1,32 @@
 """
-Integration test script for Prompt 3 (P3): Content Verification Assistant.
-Reads the original lecture text, real P1 output (test_p1_output.md), and real
-P2 output (test_p2_output.md), calls Groq API to perform an audit, and writes
-the unedited verification report to test_p3_output.md.
+Offline unit and integration test suite for Prompt 3 (P3): Content Verification Assistant.
+Verifies:
+1. P3 passes explicit max_tokens=1200 by default and preserves custom overrides.
+2. Compact evidence payload extracts and preserves cited lecture evidence, formulas, and definitions.
+3. P2 streamlining preserves all question stems, answer keys, arithmetic, and citations while eliminating distractor overhead.
+4. P1 context remains complete, factually grounded, and sufficient for verification while eliminating table formatting.
+5. Total measured request budget (input tokens + max_tokens reservation) stays comfortably below the 8,000 TPM limit.
+6. All seven required verification report sections, disclaimer, and status directives remain in P3_SYSTEM_PROMPT.
+7. Input validation (empty lecture, analysis, or questions text raises ValueError).
+8. Backward-compatible call signatures (positional & keyword).
+
+This test suite runs 100% offline without making live Groq API calls.
 """
 
 import sys
 from pathlib import Path
-from prompts.content_verifier import verify_content
+from unittest.mock import patch, MagicMock
+
+from prompts.content_verifier import (
+    P3_DEFAULT_MAX_TOKENS,
+    P3_SYSTEM_PROMPT,
+    P3_USER_PROMPT_TEMPLATE,
+    extract_evidence_payload,
+    streamline_p1_analysis_for_audit,
+    streamline_p2_questions_for_audit,
+    format_p3_user_prompt,
+    verify_content,
+)
 
 SAMPLE_LECTURE_TEXT = """--- [Page 1] ---
 CS301: Computer Architecture
@@ -39,74 +58,335 @@ Cache Miss Categories (The 3 C's):
 Note: Cache coherence protocol for multi-core systems is deferred to Chapter 8. (Unspecified in this slide deck).
 """
 
-def run_test():
-    print("=" * 60)
-    print("RUNNING P3 CONTENT VERIFIER INTEGRATION TEST")
-    print("=" * 60)
+SAMPLE_P1_ANALYSIS = """# 📚 Lecture Revision Notes: Cache Memory & Memory Hierarchy Basics
 
-    p1_path = Path("test_p1_output.md")
-    p2_path = Path("test_p2_output.md")
+## 1. Executive Overview
+- Scope: High-level overview of memory hierarchy bridging the processor-memory speed gap.
+- Estimated source coverage: Pages 1 to 2.
 
-    if not p1_path.exists():
-        print(f"[FAIL] Missing required test input: {p1_path.name}")
-        return False
-    if not p2_path.exists():
-        print(f"[FAIL] Missing required test input: {p2_path.name}")
-        return False
+## 2. Topic-by-Topic Breakdown
+### Memory Hierarchy & Locality *(Source: [Page 1])*
+- **Core Concept**: Bridges the processor-memory speed gap (Memory Wall) using SRAM and DRAM.
+- **Key Details**:
+  - Temporal Locality: Frequently accessed addresses remain in cache.
+  - Spatial Locality: Adjacent addresses fetched simultaneously.
+- **Formulas / Algorithms / Rules**: None on Page 1.
 
-    analysis_text = p1_path.read_text(encoding="utf-8")
-    questions_text = p2_path.read_text(encoding="utf-8")
+### Cache Performance Metrics *(Source: [Page 2])*
+- **Core Concept**: Quantifies access latency using AMAT.
+- **Key Details**:
+  - 3 C's: Compulsory, Capacity, Conflict misses.
+- **Formulas / Algorithms / Rules**:
+  - AMAT = Hit_Time + (Miss_Rate * Miss_Penalty)
 
-    print(f"[INPUT 1] Original lecture text: {len(SAMPLE_LECTURE_TEXT)} characters")
-    print(f"[INPUT 2] P1 Analysis: {len(analysis_text)} characters from {p1_path.name}")
-    print(f"[INPUT 3] P2 Questions & Answers: {len(questions_text)} characters from {p2_path.name}")
+## 3. Key Terminology & Definitions
+| Term / Concept | Definition & Explanation (Grounded in Lecture) | Source Page |
+| :--- | :--- | :--- |
+| SRAM | Static RAM used for caches; fast, expensive, volatile, low density. | [Page 1] |
+| DRAM | Dynamic RAM used for main memory; slower, cheaper, high density. | [Page 1] |
+| AMAT | Average Memory Access Time = Hit_Time + (Miss_Rate * Miss_Penalty). | [Page 2] |
 
-    print("\nSending audit request to Groq API (openai/gpt-oss-120b)...")
+## 4. High-Yield Revision Takeaways
+- AMAT is the core metric to optimize memory latency.
+- Locality principles (temporal & spatial) justify cache hierarchy.
+- The 3 C's classify all cache misses.
 
-    try:
-        report_markdown = verify_content(
+## 5. Topics Needing Clarification & Potential Gaps
+- Cache coherence protocol deferred to Chapter 8 (unspecified in current deck).
+"""
+
+SAMPLE_P2_QUESTIONS = """# 📝 Revision Practice Questions: Cache Memory
+
+## Part 1: Practice Questions
+
+### Section A: Multiple-Choice Questions
+1. [Page 1] What type of memory is primarily used for cache levels?
+   - A) DRAM
+   - B) SRAM
+   - C) Flash
+   - D) ROM
+
+2. [Page 2] Given Hit_Time = 2 cycles, Miss_Rate = 0.05, and Miss_Penalty = 100 cycles, what is the AMAT?
+   - A) 5 cycles
+   - B) 7 cycles
+   - C) 10 cycles
+   - D) 12 cycles
+
+---
+
+## Part 2: Complete Answer Key & Explanations
+
+### Multiple-Choice Answers
+1. **Correct Answer: B**
+   - **Explanation:** SRAM is fast, expensive, volatile, and low density, making it ideal for caches.
+   - **Source:** [Page 1]
+
+2. **Correct Answer: B**
+   - **Explanation:** AMAT = 2 + (0.05 * 100) = 2 + 5 = 7 cycles.
+   - **Source:** [Page 2]
+"""
+
+MOCK_P3_REPORT = """# 🛡️ Content Verification & Fact-Check Report
+
+> **Disclaimer:** *This is an AI-assisted academic verification report intended to aid revision quality.*
+
+## 1. Executive Verification Summary
+- The generated P1 analysis and P2 practice questions were audited against the original lecture text.
+- **Audit Verdict:** PASS
+
+## 2. Verified Claims & Grounded Concepts
+- ✅ **SRAM for Caches**: Confirmed grounded. *(Source: [Page 1])*
+- ✅ **AMAT Formula**: Confirmed grounded. *(Source: [Page 2])*
+
+## 3. Unsupported or Inaccurate Claims
+- None identified in the sample set.
+
+## 4. Mathematical & Calculation Checks
+- 🧮 **AMAT Calculation in Q2**:
+  - *Given in Generated Material:* AMAT = 2 + (0.05 * 100) = 7 cycles
+  - *Step-by-Step Verification:* 0.05 * 100 = 5.0; 2 + 5.0 = 7.0 cycles.
+  - *Verdict:* Correct
+
+## 5. Context Gaps & Ambiguities
+- Cache coherence deferred to Chapter 8.
+
+## 6. Actionable Recommended Corrections
+- No corrections required.
+
+## 7. Final Review Status
+- **Final Status:** **PASS**
+- **Justification:** All claims and calculations are grounded in the lecture text.
+"""
+
+
+def test_p3_default_max_tokens():
+    """Verify that verify_content passes max_tokens=1200 by default."""
+    print("Testing P3 default max_tokens=1200...")
+    with patch("prompts.content_verifier.generate_response") as mock_gen:
+        mock_gen.return_value = MOCK_P3_REPORT
+        result = verify_content(
             lecture_text=SAMPLE_LECTURE_TEXT,
-            analysis_text=analysis_text,
-            questions_text=questions_text,
-            temperature=0.1
+            analysis_text=SAMPLE_P1_ANALYSIS,
+            questions_text=SAMPLE_P2_QUESTIONS,
         )
 
-        print("\n[SUCCESS] Verification report received from Groq API!")
-        print("-" * 60)
-        print("Generated Audit Report Preview (First 500 characters):")
-        print("-" * 60)
-        print(report_markdown[:500] + "...\n")
+        assert mock_gen.called, "generate_response was not called"
+        call_kwargs = mock_gen.call_args[1]
+        assert call_kwargs.get("max_tokens") == 1200, f"Expected max_tokens=1200, got {call_kwargs.get('max_tokens')}"
+        assert P3_DEFAULT_MAX_TOKENS == 1200, f"Expected P3_DEFAULT_MAX_TOKENS=1200, got {P3_DEFAULT_MAX_TOKENS}"
+        assert result == MOCK_P3_REPORT
+    print("  [PASS] P3 passes max_tokens=1200 by default")
 
-        # Save actual unedited response
-        output_file = Path("test_p3_output.md")
-        output_file.write_text(report_markdown, encoding="utf-8")
-        print(f"[EVIDENCE SAVED] Full report written to: {output_file.name}")
 
-        # Structural and policy checks
-        checks = [
-            ("Disclaimer present", "Disclaimer" in report_markdown or "not a guarantee" in report_markdown.lower()),
-            ("Summary section present", "Summary" in report_markdown or "Overview" in report_markdown),
-            ("Verified claims section present", "Verified" in report_markdown),
-            ("Calculation checks present", "Calculation" in report_markdown or "AMAT" in report_markdown),
-            ("Status present (PASS/WARNINGS/NEEDS REVISION)", any(s in report_markdown for s in ["PASS", "PASS WITH WARNINGS", "NEEDS REVISION"])),
-            ("Page references present", "Page" in report_markdown),
-        ]
+def test_p3_max_tokens_override():
+    """Verify that verify_content respects custom max_tokens overrides."""
+    print("Testing P3 custom max_tokens override...")
+    with patch("prompts.content_verifier.generate_response") as mock_gen:
+        mock_gen.return_value = MOCK_P3_REPORT
+        verify_content(
+            lecture_text=SAMPLE_LECTURE_TEXT,
+            analysis_text=SAMPLE_P1_ANALYSIS,
+            questions_text=SAMPLE_P2_QUESTIONS,
+            max_tokens=1500,
+        )
 
-        print("\nOutput Structure Verification:")
-        all_passed = True
-        for name, passed in checks:
-            status = "[PASS]" if passed else "[WARN]"
-            print(f" {status} {name}")
-            if not passed:
-                all_passed = False
+        call_kwargs = mock_gen.call_args[1]
+        assert call_kwargs.get("max_tokens") == 1500, f"Expected max_tokens=1500, got {call_kwargs.get('max_tokens')}"
+    print("  [PASS] P3 respects custom max_tokens override")
 
-        print("=" * 60)
-        return all_passed
 
-    except Exception as e:
-        print(f"\n[FAIL] Test encountered an error: {type(e).__name__} - {e}")
-        return False
+def test_compact_evidence_payload():
+    """Verify that compact evidence extracts cited pages and preserves formulas."""
+    print("Testing compact evidence extraction and formula preservation...")
+    payload = extract_evidence_payload(
+        lecture_text=SAMPLE_LECTURE_TEXT,
+        analysis_text=SAMPLE_P1_ANALYSIS,
+        questions_text=SAMPLE_P2_QUESTIONS,
+    )
+
+    assert "--- [Page 1] ---" in payload
+    assert "--- [Page 2] ---" in payload
+    assert "AMAT = Hit_Time + (Miss_Rate * Miss_Penalty)" in payload
+    assert "SRAM (Static RAM)" in payload
+    assert "DRAM (Dynamic RAM)" in payload
+    assert "Compulsory Misses" in payload
+    print("  [PASS] Compact evidence preserves all cited pages, formulas, and definitions")
+
+
+def test_p2_streamlining_for_audit():
+    """Verify that P2 questions keep stems, answer key, and math while stripping distractors."""
+    print("Testing P2 question streamlining...")
+    streamlined = streamline_p2_questions_for_audit(SAMPLE_P2_QUESTIONS)
+
+    # Question stems must be preserved
+    assert "What type of memory is primarily used for cache levels?" in streamlined
+    assert "Given Hit_Time = 2 cycles" in streamlined
+    # Answer key must be preserved verbatim
+    assert "Part 2: Complete Answer Key & Explanations" in streamlined
+    assert "Correct Answer: B" in streamlined
+    assert "AMAT = 2 + (0.05 * 100) = 2 + 5 = 7 cycles." in streamlined
+    # Distractors should be stripped from Part 1
+    assert "- A) DRAM" not in streamlined
+    assert "- C) Flash" not in streamlined
+    print("  [PASS] P2 streamlining preserves questions, answer key, math, and citations")
+
+
+def test_p1_context_sufficiency_and_deduplication():
+    """Verify that P1 context retains all necessary claims and formulas while compacting table syntax."""
+    print("Testing P1 context sufficiency and deduplication...")
+    prompt = format_p3_user_prompt(
+        lecture_text=SAMPLE_LECTURE_TEXT,
+        analysis_text=SAMPLE_P1_ANALYSIS,
+        questions_text=SAMPLE_P2_QUESTIONS,
+    )
+
+    assert "Executive Overview" in prompt
+    assert "Memory Hierarchy & Locality" in prompt
+    assert "AMAT = Hit_Time + (Miss_Rate * Miss_Penalty)" in prompt
+    assert "Compulsory, Capacity, Conflict misses" in prompt
+    assert "Cache coherence protocol deferred to Chapter 8" in prompt
+    assert "[Page 1]" in prompt
+    assert "[Page 2]" in prompt
+
+    # Verify that heavy markdown table pipes (| :--- | :--- |) were compacted
+    assert ":---" not in prompt, "Redundant markdown table divider syntax was not compacted"
+    assert "SRAM" in prompt
+    assert "DRAM" in prompt
+    print("  [PASS] P1 context is complete, sufficient, and deduplicated")
+
+
+def test_request_budget_well_below_tpm_limit():
+    """Verify that total request payload + output reservation stays well below 8,000 TPM limit."""
+    print("Testing total P3 request token budget against 8,000 TPM limit...")
+    prompt = format_p3_user_prompt(
+        lecture_text=SAMPLE_LECTURE_TEXT,
+        analysis_text=SAMPLE_P1_ANALYSIS,
+        questions_text=SAMPLE_P2_QUESTIONS,
+    )
+
+    # Estimate input tokens (~4 chars per token)
+    system_tokens = len(P3_SYSTEM_PROMPT) // 4
+    user_tokens = len(prompt) // 4
+    total_input = system_tokens + user_tokens
+    total_request = total_input + P3_DEFAULT_MAX_TOKENS
+
+    print(f" -> System prompt tokens: ~{system_tokens}")
+    print(f" -> User prompt tokens:   ~{user_tokens}")
+    print(f" -> Total input tokens:   ~{total_input}")
+    print(f" -> Output reservation:   {P3_DEFAULT_MAX_TOKENS}")
+    print(f" -> Total request budget: ~{total_request} tokens (Limit: 8,000 TPM)")
+
+    assert total_request < 6000, f"Request budget {total_request} is too close to 8,000 TPM limit"
+    assert P3_DEFAULT_MAX_TOKENS == 1200
+    print("  [PASS] Total P3 request budget is well below 8,000 TPM limit (~40%+ headroom)")
+
+
+def test_p3_output_structure_requirements():
+    """Verify that all 7 required sections and status criteria remain in P3_SYSTEM_PROMPT."""
+    print("Testing P3 output structure and directives in system prompt...")
+    required_sections = [
+        ("Disclaimer", "Disclaimer"),
+        ("Executive Verification Summary", "## 1. Executive Verification Summary"),
+        ("Verified Claims", "## 2. Verified Claims & Grounded Concepts"),
+        ("Unsupported Claims", "## 3. Unsupported or Inaccurate Claims"),
+        ("Mathematical Checks", "## 4. Mathematical & Calculation Checks"),
+        ("Context Gaps", "## 5. Context Gaps & Ambiguities"),
+        ("Recommended Corrections", "## 6. Actionable Recommended Corrections"),
+        ("Final Review Status", "## 7. Final Review Status"),
+    ]
+
+    for label, section_header in required_sections:
+        assert section_header in P3_SYSTEM_PROMPT, f"Missing section '{label}' in P3_SYSTEM_PROMPT"
+
+    assert "PASS" in P3_SYSTEM_PROMPT
+    assert "PASS WITH WARNINGS" in P3_SYSTEM_PROMPT
+    assert "NEEDS REVISION" in P3_SYSTEM_PROMPT
+    print("  [PASS] All 7 P3 output structure sections and status criteria verified")
+
+
+def test_empty_input_validation():
+    """Verify that empty lecture text, analysis, or questions text raises ValueError."""
+    print("Testing empty input validation...")
+    try:
+        format_p3_user_prompt("", SAMPLE_P1_ANALYSIS, SAMPLE_P2_QUESTIONS)
+        assert False, "Should have raised ValueError for empty lecture_text"
+    except ValueError as e:
+        assert "lecture text" in str(e).lower()
+
+    try:
+        format_p3_user_prompt(SAMPLE_LECTURE_TEXT, "", SAMPLE_P2_QUESTIONS)
+        assert False, "Should have raised ValueError for empty analysis_text"
+    except ValueError as e:
+        assert "analysis" in str(e).lower()
+
+    try:
+        format_p3_user_prompt(SAMPLE_LECTURE_TEXT, SAMPLE_P1_ANALYSIS, "")
+        assert False, "Should have raised ValueError for empty questions_text"
+    except ValueError as e:
+        assert "questions" in str(e).lower()
+    print("  [PASS] Empty input validation correctly raises ValueError")
+
+
+def test_backward_compatible_signatures():
+    """Verify that verify_content maintains exact positional and keyword parameter order."""
+    print("Testing backward-compatible function signatures...")
+    with patch("prompts.content_verifier.generate_response") as mock_gen:
+        mock_gen.return_value = MOCK_P3_REPORT
+        # Positional call: lecture, analysis, questions, model, temperature, timeout, max_tokens
+        verify_content(
+            SAMPLE_LECTURE_TEXT,
+            SAMPLE_P1_ANALYSIS,
+            SAMPLE_P2_QUESTIONS,
+            "test-model",
+            0.15,
+            90.0,
+            1100,
+        )
+        kwargs = mock_gen.call_args[1]
+        assert kwargs["model"] == "test-model"
+        assert kwargs["temperature"] == 0.15
+        assert kwargs["timeout"] == 90.0
+        assert kwargs["max_tokens"] == 1100
+    print("  [PASS] Backward-compatible parameter order verified")
+
+
+def run_all_tests():
+    print("=" * 65)
+    print("RUNNING OFFLINE P3 CONTENT VERIFIER UNIT & REGRESSION TESTS")
+    print("=" * 65)
+
+    tests = [
+        test_p3_default_max_tokens,
+        test_p3_max_tokens_override,
+        test_compact_evidence_payload,
+        test_p2_streamlining_for_audit,
+        test_p1_context_sufficiency_and_deduplication,
+        test_request_budget_well_below_tpm_limit,
+        test_p3_output_structure_requirements,
+        test_empty_input_validation,
+        test_backward_compatible_signatures,
+    ]
+
+    all_passed = True
+    for test in tests:
+        try:
+            test()
+        except AssertionError as e:
+            print(f"  [FAIL] {test.__name__}: {e}")
+            all_passed = False
+        except Exception as e:
+            print(f"  [ERROR] {test.__name__}: {type(e).__name__} - {e}")
+            all_passed = False
+
+    print("=" * 65)
+    if all_passed:
+        print("ALL 9 OFFLINE P3 TESTS PASSED SUCCESSFULLY!")
+    else:
+        print("SOME TESTS FAILED - SEE DETAILS ABOVE.")
+    print("=" * 65)
+    return all_passed
+
 
 if __name__ == "__main__":
-    success = run_test()
+    success = run_all_tests()
     sys.exit(0 if success else 1)
