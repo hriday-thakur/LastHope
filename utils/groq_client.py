@@ -48,6 +48,17 @@ class APIRequestTimeoutError(GroqClientError):
     pass
 
 
+class OutputTruncatedError(GroqClientError):
+    """Raised when the model output was truncated or cut off due to reaching max_tokens."""
+    def __init__(
+        self,
+        message: str = "Generation was cut off because the model reached its maximum token allowance (finish_reason='length').",
+        partial_content: str = "",
+    ):
+        super().__init__(message)
+        self.partial_content = partial_content
+
+
 def _get_from_st_secrets(key: str) -> Optional[str]:
     """
     Safely retrieves a configuration value from Streamlit Community Cloud st.secrets.
@@ -159,12 +170,23 @@ def generate_response(
         if not completion.choices or len(completion.choices) == 0:
             raise GroqClientError("Groq API returned an empty response with no completion choices.")
 
-        content = completion.choices[0].message.content
+        choice = completion.choices[0]
+        content = choice.message.content
+        finish_reason = getattr(choice, "finish_reason", None)
+
+        if finish_reason == "length":
+            raise OutputTruncatedError(
+                "Generation was cut off because the model reached its maximum token limit (finish_reason='length').",
+                partial_content=content.strip() if content else "",
+            )
+
         if content is None:
             return ""
 
         return content.strip()
 
+    except OutputTruncatedError:
+        raise
     except groq.AuthenticationError as e:
         raise AuthenticationError("Authentication failed: Invalid Groq API key in .env or Streamlit secrets.") from e
     except groq.NotFoundError as e:

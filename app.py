@@ -26,9 +26,14 @@ from utils.groq_client import (
     RateLimitExceededError,
     NetworkConnectionError,
     APIRequestTimeoutError,
+    OutputTruncatedError,
 )
 from prompts.lecture_analyzer import analyze_lecture
-from prompts.question_generator import generate_questions
+from prompts.question_generator import (
+    generate_questions,
+    MissingAnalysisError,
+    IncompleteQuestionSetError,
+)
 from prompts.content_verifier import verify_content
 from ui.theme import inject_css
 from ui.components import (
@@ -365,6 +370,17 @@ with tab_questions:
                         st.session_state.p2_questions = p2_result
                         st.session_state.p3_verification = None
                         st.rerun()
+                except MissingAnalysisError as e:
+                    st.error(f"ANALYSIS PREREQUISITE ERROR: {e}")
+                except OutputTruncatedError as e:
+                    st.warning(
+                        "⚠️ GENERATION WAS CUT OFF: The model reached its maximum token allowance before completing "
+                        "all questions and explanations. Please select a smaller question volume (e.g., 5 or 10 questions) and try again."
+                    )
+                except IncompleteQuestionSetError as e:
+                    st.warning(
+                        f"⚠️ INCOMPLETE OUTPUT: {e} Please select a smaller question volume and try again."
+                    )
                 except MissingAPIKeyError as e:
                     st.error(f"CONFIGURATION ERROR: {e}")
                 except AuthenticationError as e:
@@ -404,6 +420,8 @@ with tab_questions:
                         with st.container(key="answer_expander"):
                             with st.expander("🔑 [EXAM MODE] REVEAL ANSWER KEY & STEP-BY-STEP EXPLANATIONS", expanded=False):
                                 st.markdown(a_part)
+                    else:
+                        st.warning("⚠️ INCOMPLETE ASSESSMENT: The answer key section (Part 2) is missing. Please regenerate with a smaller question volume.")
                 else:
                     # Dual Tabs: Practice vs Answer Key
                     sub_q, sub_a = st.tabs(["✍️ PRACTICE MODE", "🔑 COMPLETE ANSWER KEY & EXPLANATIONS"])
@@ -415,7 +433,7 @@ with tab_questions:
                             with st.container(key="answer_expander_sub"):
                                 st.markdown(a_part)
                         else:
-                            st.info("Answer key inline within question text.")
+                            st.warning("⚠️ INCOMPLETE ASSESSMENT: The answer key section (Part 2) is missing. Please regenerate with a smaller question volume.")
             else:
                 st.markdown(
                     empty_card("PRACTICE QUESTIONS WILL APPEAR HERE", "CLICK 'GENERATE PRACTICE QUESTIONS' ABOVE TO CREATE ASSESSMENT.", is_dashed_pencil=False),
