@@ -76,6 +76,10 @@ def init_session_state():
         st.session_state.file_hash = None
     if "p1_analysis" not in st.session_state:
         st.session_state.p1_analysis = None
+    if "p1_partial_content" not in st.session_state:
+        st.session_state.p1_partial_content = None
+    if "p1_truncated_error" not in st.session_state:
+        st.session_state.p1_truncated_error = None
     if "p2_questions" not in st.session_state:
         st.session_state.p2_questions = None
     if "p3_verification" not in st.session_state:
@@ -205,6 +209,8 @@ tiered practice questions, and audited answer keys calibrated for high-yield exa
                         st.session_state.file_name = uploaded_file.name
                         st.session_state.file_hash = file_signature
                         st.session_state.p1_analysis = None
+                        st.session_state.p1_partial_content = None
+                        st.session_state.p1_truncated_error = None
                         st.session_state.p2_questions = None
                         st.session_state.p3_verification = None
                         st.success(f"DOCUMENT INGESTION VERIFIED: {uploaded_file.name}")
@@ -268,11 +274,12 @@ with tab_analysis:
         col_meta, col_work = st.columns([3, 9])
 
         with col_meta:
+            stage_02_status = "COMPLETED" if p1_done else ("TRUNCATED (INCOMPLETE)" if st.session_state.p1_partial_content else "READY TO GENERATE")
             meta_items = [
                 ("SOURCE", st.session_state.file_name),
                 ("PAGES", st.session_state.parsed_doc.total_pages),
                 ("WORDS", f"{st.session_state.parsed_doc.word_count:,}"),
-                ("STAGE 02 STATUS", "COMPLETED" if p1_done else "READY TO GENERATE"),
+                ("STAGE 02 STATUS", stage_02_status),
             ]
             st.markdown(margin_meta_card(meta_items), unsafe_allow_html=True)
 
@@ -287,28 +294,71 @@ with tab_analysis:
                             timeout=120.0,
                         )
                         st.session_state.p1_analysis = p1_result
+                        st.session_state.p1_partial_content = None
+                        st.session_state.p1_truncated_error = None
                         st.session_state.p2_questions = None
                         st.session_state.p3_verification = None
                         st.rerun()
+                except OutputTruncatedError as e:
+                    st.session_state.p1_analysis = None
+                    st.session_state.p1_partial_content = getattr(e, "partial_content", "") or ""
+                    st.session_state.p1_truncated_error = str(e)
+                    st.session_state.p2_questions = None
+                    st.session_state.p3_verification = None
+                    if not st.session_state.p1_partial_content.strip():
+                        st.error(
+                            "GENERATION TRUNCATED: The model reached its maximum token limit (2,500 tokens) "
+                            "before completing output, and no partial content was returned. "
+                            "Please split the lecture material into smaller sections or chapters before analyzing."
+                        )
+                    else:
+                        st.warning(
+                            "GENERATION INCOMPLETE (TRUNCATED): The model reached its maximum token limit (2,500 tokens). "
+                            "Partial notes are displayed below for review, but Stage 03 (Practice Questions) remains disabled "
+                            "until a complete analysis is generated. Please split the lecture into smaller sections."
+                        )
                 except MissingAPIKeyError as e:
+                    st.session_state.p1_partial_content = None
+                    st.session_state.p1_truncated_error = None
                     st.error(f"CONFIGURATION ERROR: {e}")
                 except AuthenticationError as e:
+                    st.session_state.p1_partial_content = None
+                    st.session_state.p1_truncated_error = None
                     st.error(f"AUTHENTICATION ERROR: {e}")
                 except RateLimitExceededError as e:
+                    st.session_state.p1_partial_content = None
+                    st.session_state.p1_truncated_error = None
                     st.error(f"RATE LIMIT EXCEEDED: {e}")
                 except NetworkConnectionError as e:
+                    st.session_state.p1_partial_content = None
+                    st.session_state.p1_truncated_error = None
                     st.error(f"NETWORK FAILURE: {e}")
                 except APIRequestTimeoutError as e:
+                    st.session_state.p1_partial_content = None
+                    st.session_state.p1_truncated_error = None
                     st.error(f"REQUEST TIMEOUT: {e}")
                 except GroqClientError as e:
+                    st.session_state.p1_partial_content = None
+                    st.session_state.p1_truncated_error = None
                     st.error(f"API ERROR: {e}")
                 except Exception as e:
+                    st.session_state.p1_partial_content = None
+                    st.session_state.p1_truncated_error = None
                     st.error(f"UNEXPECTED ERROR: {type(e).__name__} - {e}")
 
             if st.session_state.p1_analysis:
                 st.markdown(section_label("REVISION MANUSCRIPT — STAGE 02 OUTPUT"), unsafe_allow_html=True)
                 with st.container(key="reading_sheet_notes"):
                     st.markdown(st.session_state.p1_analysis)
+            elif st.session_state.p1_partial_content and st.session_state.p1_partial_content.strip():
+                st.warning(
+                    "⚠️ PARTIAL NOTES ONLY (TRUNCATED): Generation was cut off at the token limit. "
+                    "These notes are incomplete and cannot be used to generate practice questions in Stage 03. "
+                    "Please split the lecture into smaller sections or reduce input size to generate complete revision notes."
+                )
+                st.markdown(section_label("PARTIAL REVISION MANUSCRIPT (INCOMPLETE)"), unsafe_allow_html=True)
+                with st.container(key="reading_sheet_notes"):
+                    st.markdown(st.session_state.p1_partial_content)
             else:
                 st.markdown(
                     empty_card("NOTES WILL APPEAR HERE", "CLICK 'GENERATE REVISION NOTES' ABOVE TO BEGIN SYNTHESIS.", is_dashed_pencil=False),
