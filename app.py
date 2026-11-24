@@ -534,6 +534,12 @@ with tab_verify:
                         )
                         st.session_state.p3_verification = p3_result
                         st.rerun()
+                except OutputTruncatedError as e:
+                    st.session_state.p3_verification = None
+                    st.warning(
+                        f"⚠️ AUDIT TRUNCATED: {e} "
+                        "The partial audit was not saved as a completed verification. Please try again."
+                    )
                 except MissingAPIKeyError as e:
                     st.error(f"CONFIGURATION ERROR: {e}")
                 except AuthenticationError as e:

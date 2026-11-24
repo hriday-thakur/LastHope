@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+from utils.groq_client import OutputTruncatedError
 from prompts.content_verifier import (
     P3_DEFAULT_MAX_TOKENS,
     P3_SYSTEM_PROMPT,
@@ -350,6 +351,36 @@ def test_backward_compatible_signatures():
     print("  [PASS] Backward-compatible parameter order verified")
 
 
+def test_concise_output_directives():
+    """Verify that P3_SYSTEM_PROMPT enforces 350-450 word compact output."""
+    print("Testing concise output directives in P3_SYSTEM_PROMPT...")
+    assert "350–450" in P3_SYSTEM_PROMPT or "350-450" in P3_SYSTEM_PROMPT
+    assert "maximum 2 sentences" in P3_SYSTEM_PROMPT.lower()
+    assert "maximum 3" in P3_SYSTEM_PROMPT.lower()
+    print("  [PASS] Concise output directives (350-450 words, max 2 sentences, max 3 recommendations) verified")
+
+
+def test_truncation_error_propagation():
+    """Verify that OutputTruncatedError propagates cleanly when finish_reason='length'."""
+    print("Testing OutputTruncatedError propagation...")
+    with patch("prompts.content_verifier.generate_response") as mock_gen:
+        mock_gen.side_effect = OutputTruncatedError(
+            "Generation was cut off because the model reached its maximum token limit (finish_reason='length').",
+            partial_content="## 1. Executive Verification Summary\nPartial...",
+        )
+        try:
+            verify_content(
+                lecture_text=SAMPLE_LECTURE_TEXT,
+                analysis_text=SAMPLE_P1_ANALYSIS,
+                questions_text=SAMPLE_P2_QUESTIONS,
+            )
+            assert False, "Expected OutputTruncatedError to be raised"
+        except OutputTruncatedError as e:
+            assert "finish_reason='length'" in str(e)
+            assert e.partial_content.startswith("## 1.")
+    print("  [PASS] OutputTruncatedError propagates cleanly without marking partial output as success")
+
+
 def run_all_tests():
     print("=" * 65)
     print("RUNNING OFFLINE P3 CONTENT VERIFIER UNIT & REGRESSION TESTS")
@@ -365,6 +396,8 @@ def run_all_tests():
         test_p3_output_structure_requirements,
         test_empty_input_validation,
         test_backward_compatible_signatures,
+        test_concise_output_directives,
+        test_truncation_error_propagation,
     ]
 
     all_passed = True
